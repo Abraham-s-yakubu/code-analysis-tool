@@ -153,3 +153,29 @@ export function debounce(func, wait) {
   };
 }
 
+/**
+ * Shuffles the elements of an array in place using the Fisher-Yates algorithm.
+ * @param {Array<any>} array The array to shuffle.
+ * @returns {Array<any>} The shuffled array.
+ */
+export function shuffle(array) {
+  if (!Array.isArray(array)) {
+    throw new Error('The provided input must be an array.');
+  }
+  let currentIndex = array.length;
+  let randomIndex;
+
+  // While there remain elements to shuffle.
+  while (currentIndex !== 0) {
+    // Pick a remaining element.
+    randomIndex = Math.floor(Math.random() * currentIndex);
+    currentIndex--;
+
+    // And swap it with the current element.
+    [array[currentIndex], array[randomIndex]] = [
+      array[randomIndex], array[currentIndex]];
+  }
+
+  return array;
+}
+
