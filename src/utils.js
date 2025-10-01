@@ -119,3 +119,18 @@ export function isObjectEmpty(obj) {
   return Object.keys(obj).length === 0 && obj.constructor === Object;
 }
 
+/**
+ * Parses a URL's query string and returns an object of key-value pairs.
+ * @param {string} url The URL to parse.
+ * @returns {object} An object containing the query parameters.
+ */
+export function getQueryParams(url) {
+  try {
+    const urlObj = new URL(url);
+    return Object.fromEntries(urlObj.searchParams.entries());
+  } catch (error) {
+    console.error("Invalid URL provided:", error);
+    return {};
+  }
+}
+
