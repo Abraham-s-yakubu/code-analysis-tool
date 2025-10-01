@@ -8,16 +8,22 @@ const DOCS_FILE = 'README.md';
 const SOURCE_CODE_PATTERN = 'src/**/*.js'; // Pattern to find source files
 const GIT_REPO_PATH = process.cwd();
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const MAX_RETRIES = 3; // Number of times to retry the API call
 
 /**
- * Calls the Gemini API with improved error handling to provide detailed logs.
+ * A helper function to wait for a specified amount of time.
+ * @param {number} ms The number of milliseconds to wait.
+ */
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * A robust function to call the Gemini API with retry logic.
  * @param {string} prompt The prompt to send to the model.
  * @returns {Promise<string>} The generated text from the model.
  */
 async function generateWithGemini(prompt) {
     if (!GEMINI_API_KEY) {
-        console.error("GEMINI_API_KEY environment variable not set or empty.");
-        throw new Error("GEMINI_API_KEY is not configured.");
+        throw new Error("GEMINI_API_KEY environment variable not set.");
     }
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
     
@@ -29,66 +35,73 @@ async function generateWithGemini(prompt) {
         },
     };
 
-    try {
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
-        const result = await response.json();
+            if (!response.ok) {
+                const errorBody = await response.text();
+                // Don't retry on client-side errors (like 400), but do retry on server errors (5xx) or rate limits (429)
+                if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                     console.error(`Gemini API Error: Status ${response.status}\nResponse Body:\n${errorBody}`);
+                     throw new Error(`API call failed with status ${response.status}. This is a client-side error and will not be retried.`);
+                }
+                 console.warn(`Attempt ${attempt} failed with status ${response.status}. Retrying...`);
+                 await sleep(1000 * Math.pow(2, attempt)); // Exponential backoff
+                 continue; // Go to the next attempt
+            }
 
-        if (!response.ok) {
-            const errorDetails = result.error ? JSON.stringify(result.error, null, 2) : 'No error details provided.';
-            console.error(`Gemini API Error: Status ${response.status}\nResponse Body:\n${errorDetails}`);
-            throw new Error(`API call failed with status ${response.status}. Check the GitHub Actions log for details.`);
+            const result = await response.json();
+            return result.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+        } catch (error) {
+            console.error(`An exception occurred during the Gemini API call on attempt ${attempt}:`, error.message);
+            if (attempt === MAX_RETRIES) {
+                throw new Error(`API call failed after ${MAX_RETRIES} attempts. Last error: ${error.message}`);
+            }
+            await sleep(1000 * Math.pow(2, attempt)); // Wait before retrying
         }
-
-        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!text) {
-             console.error("Invalid response structure from Gemini API:", JSON.stringify(result, null, 2));
-             throw new Error("Received an invalid or empty response from the Gemini API.");
-        }
-
-        return text;
-
-    } catch (error) {
-        console.error("An exception occurred during the Gemini API call. This could be a network issue or a problem with the request setup.", error);
-        // Re-throw the error to ensure the GitHub Action fails clearly and stops execution.
-        throw error;
     }
+    throw new Error("API call failed after all retries.");
 }
 
 
 /**
  * Finds all JavaScript files that have changed in the last commit.
- * Handles the edge case of the first commit in a repository.
+ * Handles the case where there is only one commit in the history.
  * @returns {Promise<string[]>} A list of modified file paths.
  */
 async function getChangedFiles() {
     const git = simpleGit(GIT_REPO_PATH);
-    const isRepo = await git.checkIsRepo();
-    if (!isRepo) {
-        console.warn("Not a git repository. Scanning all files.");
-        const files = await require('glob').glob(SOURCE_CODE_PATTERN);
-        return files;
-    }
-
     try {
         const log = await git.log({ n: 2 });
         if (log.total < 2) {
-            console.warn("Only one commit found. Documenting all files in the repository.");
-            const files = await require('glob').glob(SOURCE_CODE_PATTERN);
-            return files;
+            console.warn("Only one commit found. Analyzing all files in the project.");
+            return await getAllSourceFiles();
         }
         const diffSummary = await git.diffSummary(['HEAD~1', 'HEAD']);
         return diffSummary.files
             .map(file => file.file)
-            .filter(file => file.startsWith('src/') && file.endsWith('.js'));
+            .filter(file => file.endsWith('.js') && file.startsWith('src/'));
     } catch (error) {
-        console.error("Error getting changed files from git:", error);
-        return [];
+        console.error("Error getting changed files, falling back to all files:", error);
+        return await getAllSourceFiles();
     }
+}
+
+/**
+ * Finds all source code files matching the configured pattern.
+ * Used as a fallback when git diff fails.
+ * @returns {Promise<string[]>} A list of all source file paths.
+ */
+async function getAllSourceFiles() {
+    console.log(`Searching for all files matching: ${SOURCE_CODE_PATTERN}`);
+    const files = await require('glob').glob(SOURCE_CODE_PATTERN);
+    return files;
 }
 
 /**
@@ -97,25 +110,20 @@ async function getChangedFiles() {
  * @returns {Promise<{name: string, code: string}[]>} An array of objects with function name and source code.
  */
 async function extractExportedFunctions(filePath) {
-    try {
-        const code = await fs.readFile(filePath, 'utf-8');
-        const ast = parse(code, { sourceType: 'module', plugins: ['jsx'] });
-        const exportedFunctions = [];
+    const code = await fs.readFile(filePath, 'utf-8');
+    const ast = parse(code, { sourceType: 'module', plugins: ['jsx'] });
+    const exportedFunctions = [];
 
-        ast.program.body.forEach(node => {
-            if (node.type === 'ExportNamedDeclaration' && node.declaration && node.declaration.type === 'FunctionDeclaration') {
-                const func = node.declaration;
-                const functionName = func.id.name;
-                const functionCode = code.substring(func.start, func.end);
-                exportedFunctions.push({ name: functionName, code: functionCode });
-            }
-        });
+    ast.program.body.forEach(node => {
+        if (node.type === 'ExportNamedDeclaration' && node.declaration && node.declaration.type === 'FunctionDeclaration') {
+            const func = node.declaration;
+            const functionName = func.id.name;
+            const functionCode = code.substring(func.start, func.end);
+            exportedFunctions.push({ name: functionName, code: functionCode });
+        }
+    });
 
-        return exportedFunctions;
-    } catch (error) {
-        console.error(`Failed to parse file: ${filePath}`, error);
-        return [];
-    }
+    return exportedFunctions;
 }
 
 
@@ -155,13 +163,7 @@ async function updateDocsFile(functionName, newDocsContent) {
     const startMarker = `<!-- DOCS:START:${functionName} -->`;
     const endMarker = `<!-- DOCS:END:${functionName} -->`;
 
-    let fileContent;
-    try {
-        fileContent = await fs.readFile(DOCS_FILE, 'utf-8');
-    } catch (error) {
-        console.error(`Error: Could not read documentation file at ${DOCS_FILE}. Please ensure it exists.`);
-        throw error;
-    }
+    let fileContent = await fs.readFile(DOCS_FILE, 'utf-8');
 
     const startIndex = fileContent.indexOf(startMarker);
     const endIndex = fileContent.indexOf(endMarker);
@@ -174,7 +176,7 @@ async function updateDocsFile(functionName, newDocsContent) {
     const contentBefore = fileContent.substring(0, startIndex + startMarker.length);
     const contentAfter = fileContent.substring(endIndex);
     
-    const finalContent = `${contentBefore}\n\n${newDocsContent.trim()}\n\n${contentAfter}`;
+    const finalContent = `${contentBefore}\n${newDocsContent}\n${contentAfter}`;
 
     await fs.writeFile(DOCS_FILE, finalContent, 'utf-8');
     console.log(`Successfully updated documentation for "${functionName}".`);
@@ -186,30 +188,32 @@ async function updateDocsFile(functionName, newDocsContent) {
  */
 async function main() {
     console.log("Living Documentation Agent started...");
-    const changedFiles = await getChangedFiles();
+    try {
+        const changedFiles = await getChangedFiles();
 
-    if (changedFiles.length === 0) {
-        console.log("No relevant source files changed. Exiting.");
-        return;
-    }
-
-    console.log("Changed files:", changedFiles);
-
-    for (const file of changedFiles) {
-        const functions = await extractExportedFunctions(file);
-        for (const func of functions) {
-            console.log(`Found changed/new function: "${func.name}" in ${file}`);
-            const prompt = createDocumentationPrompt(func.name, func.code);
-            const newDocs = await generateWithGemini(prompt);
-            await updateDocsFile(func.name, newDocs);
+        if (changedFiles.length === 0) {
+            console.log("No relevant source files changed. Exiting.");
+            return;
         }
+
+        console.log("Changed files:", changedFiles);
+
+        for (const file of changedFiles) {
+            const functions = await extractExportedFunctions(file);
+            for (const func of functions) {
+                console.log(`Found changed/new function: "${func.name}" in ${file}`);
+                const prompt = createDocumentationPrompt(func.name, func.code);
+                const newDocs = await generateWithGemini(prompt);
+                await updateDocsFile(func.name, newDocs);
+            }
+        }
+    } catch (error) {
+        console.error("The agent encountered a fatal error:", error.message);
+        process.exit(1); // Exit with a non-zero code to fail the GitHub Action
     }
 
     console.log("Living Documentation Agent finished.");
 }
 
-main().catch(error => {
-    console.error("The agent encountered a fatal error:", error.message);
-    process.exit(1); // Exit with a non-zero code to ensure the GitHub Action is marked as failed.
-});
+main();
 
