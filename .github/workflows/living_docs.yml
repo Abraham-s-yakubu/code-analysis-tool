@@ -5,6 +5,10 @@ on:
     branches:
       - main # Or whatever your primary branch is
 
+# Add this permissions block to grant write access
+permissions:
+  contents: write
+
 jobs:
   update-docs:
     runs-on: ubuntu-latest
