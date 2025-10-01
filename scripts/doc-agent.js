@@ -1,5 +1,5 @@
 const fs = require('fs').promises;
-const path = path = require('path');
+const path = require('path');
 const { parse } = require('@babel/parser');
 const simpleGit = require('simple-git');
 
