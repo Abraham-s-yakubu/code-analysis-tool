@@ -5,7 +5,9 @@ API Reference
 Here is the documentation for our public functions.
 
 <!-- DOCS:START:calculatePrice -->
-Error generating documentation.
+
+<!-- This section is auto-generated. Do not edit manually. -->
+
 <!-- DOCS:END:calculatePrice -->
 
 <!-- DOCS:START:getUserProfile -->
