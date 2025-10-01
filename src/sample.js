@@ -3,10 +3,17 @@
  */
 
 /**
- * Calculate the area of a rectangle
+ * Calculate the area of a rectangle with validation
+ * Now includes input validation for better error handling
  */
-export function addThreeNumber(a, b, c) {
-    return a+b+c;
+export function calculateArea(length, width) {
+    if (typeof length !== 'number' || typeof width !== 'number') {
+        throw new Error('Both length and width must be numbers');
+    }
+    if (length < 0 || width < 0) {
+        throw new Error('Length and width must be positive numbers');
+    }
+    return length * width;
 }
 
 /**
