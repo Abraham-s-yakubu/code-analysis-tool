@@ -55,10 +55,19 @@ async function generateWithGemini(prompt) {
  */
 async function getChangedFiles() {
     const git = simpleGit(GIT_REPO_PATH);
-    const diffSummary = await git.diffSummary(['HEAD~1', 'HEAD']);
-    return diffSummary.files
-        .map(file => file.file)
-        .filter(file => file.endsWith('.js') && file.startsWith('src/'));
+    try {
+        // This command fails if there is only one commit in the history.
+        const diffSummary = await git.diffSummary(['HEAD~1', 'HEAD']);
+        return diffSummary.files
+            .map(file => file.file)
+            .filter(file => file.endsWith('.js') && file.startsWith('src/'));
+    } catch (error) {
+        // This can happen on the very first commit in a repo.
+        console.warn("Could not get diff summary. This is expected on the first commit.", error.message);
+        // In this case, we'll fall back to checking all files.
+        const allFiles = await git.lsFiles();
+        return allFiles.filter(file => file.endsWith('.js') && file.startsWith('src/'));
+    }
 }
 
 /**
@@ -168,3 +177,4 @@ async function main() {
 }
 
 main().catch(console.error);
+
